@@ -6,30 +6,60 @@ import { useGLTF, useAnimations } from '@react-three/drei'
 import { SkeletonUtils } from 'three-stdlib'
 import { useNpcStore, NPC_STATE } from '../state/useNpcStore'
 import { npcTransform } from '../state/npcTransform'
+import { gameConfig } from '../config/gameConfig'
 import * as THREE from 'three'
 import * as YUKA from 'yuka'
 
 const SELFIE_POSES = ['Selfie Finger', 'Selfie Peace', 'Selfie Thumbs']
 const randRange = (min, max) => min + Math.random() * (max - min)
 
+// Precompute building AABBs with padding for hard collision
+const NPC_RADIUS = 1.0
+const BUILDING_AABBS = gameConfig.buildings.map((b) => ({
+  minX: b.pos[0] - b.size[0] / 2 - NPC_RADIUS,
+  maxX: b.pos[0] + b.size[0] / 2 + NPC_RADIUS,
+  minZ: b.pos[2] - b.size[2] / 2 - NPC_RADIUS,
+  maxZ: b.pos[2] + b.size[2] / 2 + NPC_RADIUS,
+}))
+
+// Resolve position so it doesn't overlap any building AABB
+function resolveCollisions(pos) {
+  for (const bb of BUILDING_AABBS) {
+    if (pos.x > bb.minX && pos.x < bb.maxX && pos.z > bb.minZ && pos.z < bb.maxZ) {
+      const pushLeft = pos.x - bb.minX
+      const pushRight = bb.maxX - pos.x
+      const pushBack = pos.z - bb.minZ
+      const pushFront = bb.maxZ - pos.z
+      const minPush = Math.min(pushLeft, pushRight, pushBack, pushFront)
+      if (minPush === pushLeft) pos.x = bb.minX
+      else if (minPush === pushRight) pos.x = bb.maxX
+      else if (minPush === pushBack) pos.z = bb.minZ
+      else pos.z = bb.maxZ
+    }
+  }
+}
+
 export default function NPC({ config }) {
   const group = useRef()
   const { scene, animations } = useGLTF('/models/Cat_MASTER_Selfie_2.glb')
   const clone = React.useMemo(() => SkeletonUtils.clone(scene), [scene])
-  const { nodes, materials } = useGraph(clone)
+  const { nodes } = useGraph(clone)
   const { mixer } = useAnimations(animations, group)
 
   // Animation refs
   const myActions = useRef({})
   const currentAnimRef = useRef(null)
   const poseAnimRef = useRef(SELFIE_POSES[0])
-  const prevStateRef = useRef(null)
+
+  // State machine refs — all state is in refs, only read from Zustand store
+  const internalStateRef = useRef(null) // mirrors store state, drives animation/behavior changes
   const summonTimerRef = useRef(0)
   const poseTimerRef = useRef(0)
   const initRef = useRef(false)
+  const facingAngleRef = useRef(0) // owned rotation, not driven by Yuka when stopped
 
   // Roam cadence refs (walk ↔ idle cycle)
-  const roamPhaseRef = useRef('walking') // 'walking' | 'idling'
+  const roamPhaseRef = useRef('walking')
   const roamTimerRef = useRef(0)
   const roamDurationRef = useRef(randRange(4, 8))
 
@@ -39,10 +69,7 @@ export default function NPC({ config }) {
   // Plumbob (Sims diamond) ref
   const plumbobRef = useRef()
 
-  // Phone mesh ref (for selfie camera world position)
-  // const phoneRef = useRef(null)
-
-  // Camera anchor ref (attached to head bone, positioned in front of face)
+  // Camera anchor ref (attached to head bone)
   const camAnchorRef = useRef(null)
 
   // --- Find head bone for camera parenting ---
@@ -58,7 +85,6 @@ export default function NPC({ config }) {
         if (candidates.includes(n)) found = child
       }
     })
-    // Fallback: any bone with "head" (not IK/pole)
     if (!found) {
       clone.traverse((child) => {
         if (child.isBone && !found) {
@@ -73,10 +99,6 @@ export default function NPC({ config }) {
     return found
   }, [clone])
 
-  // --- Selfie stick commented out ---
-  // const handBone = React.useMemo(() => { ... }, [clone])
-  // useEffect(() => { ... }, [handBone])
-
   // --- Attach camera anchor to head bone ---
   useEffect(() => {
     if (!headBone) {
@@ -85,20 +107,17 @@ export default function NPC({ config }) {
     }
     const anchor = new THREE.Object3D()
     anchor.name = 'selfie_cam_anchor'
-    // Tweak: position in front of the face in the head bone's local space
-    // Y = up from head, Z = forward from face (adjust to taste)
     anchor.position.set(0, 0.3, 1.5)
     headBone.add(anchor)
     camAnchorRef.current = anchor
     console.log('[NPC] Camera anchor attached to head bone')
-
     return () => {
       headBone.remove(anchor)
       camAnchorRef.current = null
     }
   }, [headBone])
 
-  // --- Animation helpers (unchanged) ---
+  // --- Animation helpers ---
 
   function getAction(name) {
     if (myActions.current[name]) return myActions.current[name]
@@ -109,14 +128,51 @@ export default function NPC({ config }) {
     return action
   }
 
-  function switchAnim(name, { loop = true, clamp = false, speed = 1, fadeDuration = 0.3 } = {}) {
-    const newAction = getAction(name)
+  // Hard-switch: instantly play the new animation, zeroing all others in one frame.
+  // Does NOT call stopAllAction/reset the cache — that causes a bind-pose flash.
+  function hardSwitch(name, { loop = true, fallback = null } = {}) {
+    let resolvedName = name
+    let newAction = getAction(name)
     if (!newAction) {
-      console.warn('[NPC] Animation not found:', name)
-      return
+      console.warn('[NPC] Animation not found:', name, '— available:', animations.map((c) => c.name))
+      if (fallback) {
+        newAction = getAction(fallback)
+        resolvedName = fallback
+      }
+      if (!newAction) return
     }
-    // Same animation — just update speed, don't crossfade
-    if (currentAnimRef.current === name) {
+    if (currentAnimRef.current === resolvedName) return
+
+    // Instantly zero every other cached action (no fade — single frame cut)
+    Object.entries(myActions.current).forEach(([k, a]) => {
+      if (k !== resolvedName && a) {
+        a.setEffectiveWeight(0)
+        a.stop()
+      }
+    })
+
+    newAction.reset()
+    newAction.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity)
+    newAction.clampWhenFinished = false
+    newAction.setEffectiveTimeScale(1)
+    newAction.setEffectiveWeight(1)
+    newAction.play()
+    currentAnimRef.current = resolvedName
+  }
+
+  // Soft-switch: crossfade into the new animation
+  function softSwitch(name, { loop = true, clamp = false, speed = 1, fadeDuration = 0.3, fallback = null } = {}) {
+    let resolvedName = name
+    let newAction = getAction(name)
+    if (!newAction) {
+      console.warn('[NPC] Animation not found:', name, '— available:', animations.map((c) => c.name))
+      if (fallback) {
+        newAction = getAction(fallback)
+        resolvedName = fallback
+      }
+      if (!newAction) return
+    }
+    if (currentAnimRef.current === resolvedName) {
       newAction.setEffectiveTimeScale(speed)
       return
     }
@@ -125,18 +181,17 @@ export default function NPC({ config }) {
     newAction.clampWhenFinished = clamp
     newAction.setEffectiveTimeScale(speed)
     newAction.setEffectiveWeight(1)
-    // Fade out ALL other cached actions (not just the previous one)
     Object.values(myActions.current).forEach((a) => {
-      if (a !== newAction) a.fadeOut(fadeDuration)
+      if (a && a !== newAction) a.fadeOut(fadeDuration)
     })
     newAction.fadeIn(fadeDuration).play()
-    currentAnimRef.current = name
+    currentAnimRef.current = resolvedName
   }
 
   // --- Yuka helpers ---
 
   function setBehavior(type) {
-    const { vehicle } = yukaRef.current
+    const { vehicle, obstacles } = yukaRef.current
     vehicle.steering.clear()
     vehicle.velocity.set(0, 0, 0)
 
@@ -155,10 +210,75 @@ export default function NPC({ config }) {
       vehicle.maxSpeed = config?.runSpeed ?? 8
       const arrive = new YUKA.ArriveBehavior(
         new YUKA.Vector3(targetSpot.pos[0], 0, targetSpot.pos[2]),
-        2,   // deceleration (1=fast, 3=slow)
-        0.5, // tolerance
+        2,
+        0.5,
       )
       vehicle.steering.add(arrive)
+    }
+
+    if (type && obstacles?.length) {
+      const avoidance = new YUKA.ObstacleAvoidanceBehavior(obstacles)
+      avoidance.dBoxMinLength = 8
+      avoidance.brakingWeight = 2.0
+      avoidance.weight = 3
+      vehicle.steering.add(avoidance)
+    }
+  }
+
+  // Called once when entering a state — drives behavior + animation
+  function enterState(state) {
+    if (internalStateRef.current === state) return  // already in this state, never re-enter
+    const prev = internalStateRef.current
+    internalStateRef.current = state
+    if (state === NPC_STATE.POSE) {
+      console.trace(`[NPC] enterState POSE (from ${prev})`)
+    } else {
+      console.log(`[NPC] enterState ${prev} → ${state}`)
+    }
+
+    switch (state) {
+      case NPC_STATE.IDLE_ROAM:
+        roamPhaseRef.current = 'walking'
+        roamTimerRef.current = 0
+        roamDurationRef.current = randRange(4, 8)
+        setBehavior('wander')
+        softSwitch('SelfieWalk')
+        break
+
+      case NPC_STATE.SUMMONED: {
+        summonTimerRef.current = 0
+        poseAnimRef.current = SELFIE_POSES[Math.floor(Math.random() * SELFIE_POSES.length)]
+        setBehavior(null)
+        hardSwitch('Selfie Idle')
+        // Face the target spot
+        const { targetSpot } = useNpcStore.getState()
+        const { vehicle } = yukaRef.current
+        if (targetSpot) {
+          const dx = targetSpot.pos[0] - vehicle.position.x
+          const dz = targetSpot.pos[2] - vehicle.position.z
+          if (dx !== 0 || dz !== 0) {
+            facingAngleRef.current = Math.atan2(dx, dz)
+          }
+        }
+        break
+      }
+
+      case NPC_STATE.RUN_TO_SPOT:
+        setBehavior('arrive')
+        softSwitch('SelfieWalk', { speed: 2 })
+        break
+
+      case NPC_STATE.POSE:
+        setBehavior(null)
+        poseTimerRef.current = 0
+        console.log('[NPC] POSE: playing', poseAnimRef.current)
+        softSwitch(poseAnimRef.current, { loop: false, clamp: true, speed: 1, fadeDuration: 0.08, fallback: 'Selfie Idle' })
+        break
+
+      case NPC_STATE.DONE:
+        setBehavior(null)
+        hardSwitch('Selfie Idle')
+        break
     }
   }
 
@@ -169,145 +289,118 @@ export default function NPC({ config }) {
 
     // Boot Yuka on first frame
     if (!initRef.current) {
+      console.log('[NPC] Available animations:', animations.map((c) => c.name))
+
       const vehicle = new YUKA.Vehicle()
       vehicle.maxSpeed = config?.walkSpeed ?? 2
-      vehicle.maxForce = 10
-      vehicle.maxTurnRate = Math.PI * 1.5
-      vehicle.boundingRadius = 0.5
+      vehicle.maxForce = 40
+      vehicle.maxTurnRate = Math.PI * 2
+      vehicle.boundingRadius = 1.0
 
       const entityManager = new YUKA.EntityManager()
       entityManager.add(vehicle)
 
-      yukaRef.current = { vehicle, entityManager }
+      const obstacles = gameConfig.buildings.map((b) => {
+        const obstacle = new YUKA.GameEntity()
+        obstacle.position.set(b.pos[0], 0, b.pos[2])
+        obstacle.boundingRadius = Math.sqrt((b.size[0] / 2) ** 2 + (b.size[2] / 2) ** 2) + 2.0
+        entityManager.add(obstacle)
+        return obstacle
+      })
 
-      // Start wandering
-      setBehavior('wander')
-      switchAnim('SelfieWalk')
+      yukaRef.current = { vehicle, entityManager, obstacles }
+
+      enterState(NPC_STATE.IDLE_ROAM)
       initRef.current = true
     }
 
     const { vehicle, entityManager } = yukaRef.current
-    const { state: npcState, targetSpot } = useNpcStore.getState()
+    const storeState = useNpcStore.getState().state
+    const { targetSpot } = useNpcStore.getState()
 
-    // --- State change → switch behavior + animation ---
-    if (npcState !== prevStateRef.current) {
-      prevStateRef.current = npcState
+    // --- Detect store state changes and enter new state exactly once ---
+    if (storeState !== internalStateRef.current) {
+      enterState(storeState)
+    }
 
-      switch (npcState) {
-        case NPC_STATE.IDLE_ROAM:
+    // --- State-specific per-frame logic ---
+    const s = internalStateRef.current
+
+    if (s === NPC_STATE.IDLE_ROAM) {
+      roamTimerRef.current += delta
+      if (roamTimerRef.current >= roamDurationRef.current) {
+        roamTimerRef.current = 0
+        if (roamPhaseRef.current === 'walking') {
+          roamPhaseRef.current = 'idling'
+          roamDurationRef.current = randRange(2, 4)
+          setBehavior(null)
+          softSwitch('Selfie Idle')
+        } else {
           roamPhaseRef.current = 'walking'
-          roamTimerRef.current = 0
           roamDurationRef.current = randRange(4, 8)
           setBehavior('wander')
-          switchAnim('SelfieWalk')
-          break
-        case NPC_STATE.SUMMONED: {
-          poseAnimRef.current = SELFIE_POSES[Math.floor(Math.random() * SELFIE_POSES.length)]
-          setBehavior(null) // stop moving
-          switchAnim('Selfie Idle')
-          // Face target spot immediately so camera doesn't jump when running starts
-          const { targetSpot: summonTarget } = useNpcStore.getState()
-          if (summonTarget) {
-            const dx = summonTarget.pos[0] - vehicle.position.x
-            const dz = summonTarget.pos[2] - vehicle.position.z
-            if (dx !== 0 || dz !== 0) {
-              const angle = Math.atan2(dx, dz)
-              vehicle.rotation.fromEuler(0, angle, 0)
-            }
-          }
-          break
+          softSwitch('SelfieWalk')
         }
-        case NPC_STATE.RUN_TO_SPOT:
-          setBehavior('arrive')
-          switchAnim('SelfieWalk', { speed: 2 })
-          break
-        case NPC_STATE.POSE: {
-          setBehavior(null)
-          switchAnim(poseAnimRef.current, { loop: false, clamp: true, speed: 1, fadeDuration: 0.1 })
-          break
-        }
-        case NPC_STATE.DONE:
-          setBehavior(null)
-          switchAnim('Selfie Idle')
-          break
+      }
+    }
+
+    if (s === NPC_STATE.SUMMONED) {
+      summonTimerRef.current += delta
+      if (summonTimerRef.current >= 0.5) {
+        summonTimerRef.current = -999 // sentinel: prevents re-firing until next enterState resets it
+        useNpcStore.getState().setState(NPC_STATE.RUN_TO_SPOT)
+      }
+    }
+
+    if (s === NPC_STATE.RUN_TO_SPOT && targetSpot) {
+      const dx = targetSpot.pos[0] - vehicle.position.x
+      const dz = targetSpot.pos[2] - vehicle.position.z
+      const dist = Math.sqrt(dx * dx + dz * dz)
+      if (dist < 1.5) {
+        // Lock facing toward spot and hard-stop Yuka before entityManager.update this frame
+        facingAngleRef.current = Math.atan2(dx, dz)
+        vehicle.steering.clear()
+        vehicle.velocity.set(0, 0, 0)
+        // Call enterState directly so animation starts this frame and internalStateRef
+        // is POSE before the rotation/timer checks below run
+        enterState(NPC_STATE.POSE)
+        useNpcStore.getState().setState(NPC_STATE.POSE)
+      }
+    }
+
+    if (s === NPC_STATE.POSE) {
+      poseTimerRef.current += delta
+      if (poseTimerRef.current >= 2.0) {
+        poseTimerRef.current = -999 // sentinel: prevents re-firing
+        useNpcStore.getState().setState(NPC_STATE.SELFIE_CAPTURE)
       }
     }
 
     // --- Update Yuka ---
     entityManager.update(delta)
 
-    // Keep on ground plane & clamp to floor bounds
+    // Keep on ground plane & clamp to bounds
     vehicle.position.y = 0
     const BOUND = 90
     vehicle.position.x = Math.max(-BOUND, Math.min(BOUND, vehicle.position.x))
     vehicle.position.z = Math.max(-BOUND, Math.min(BOUND, vehicle.position.z))
+    resolveCollisions(vehicle.position)
 
-    // --- Sync Yuka → Three.js ---
-    group.current.position.set(
-      vehicle.position.x,
-      vehicle.position.y,
-      vehicle.position.z,
-    )
+    // --- Sync Yuka position → Three.js ---
+    group.current.position.set(vehicle.position.x, vehicle.position.y, vehicle.position.z)
 
-    // Extract facing direction from Yuka's rotation quaternion
-    const forward = vehicle.getDirection(new YUKA.Vector3())
-    if (forward.x !== 0 || forward.z !== 0) {
-      group.current.rotation.y = Math.atan2(forward.x, forward.z)
-    }
-
-    // --- State-specific timers ---
-    switch (npcState) {
-      case NPC_STATE.IDLE_ROAM: {
-        roamTimerRef.current += delta
-        if (roamTimerRef.current >= roamDurationRef.current) {
-          roamTimerRef.current = 0
-          if (roamPhaseRef.current === 'walking') {
-            // Stop and idle
-            roamPhaseRef.current = 'idling'
-            roamDurationRef.current = randRange(2, 4)
-            setBehavior(null)
-            switchAnim('Selfie Idle')
-          } else {
-            // Resume wandering
-            roamPhaseRef.current = 'walking'
-            roamDurationRef.current = randRange(4, 8)
-            setBehavior('wander')
-            switchAnim('SelfieWalk')
-          }
-        }
-        break
-      }
-      case NPC_STATE.SUMMONED: {
-        summonTimerRef.current += delta
-        if (summonTimerRef.current >= 0.5) {
-          summonTimerRef.current = 0
-          queueMicrotask(() => useNpcStore.getState().setState(NPC_STATE.RUN_TO_SPOT))
-        }
-        break
-      }
-      case NPC_STATE.RUN_TO_SPOT: {
-        if (targetSpot) {
-          const dx = targetSpot.pos[0] - vehicle.position.x
-          const dz = targetSpot.pos[2] - vehicle.position.z
-          const dist = Math.sqrt(dx * dx + dz * dz)
-          if (dist < 0.5) {
-            // Don't snap position — NPC is close enough, just stop
-            vehicle.velocity.set(0, 0, 0)
-            poseTimerRef.current = 0
-            queueMicrotask(() => useNpcStore.getState().setState(NPC_STATE.POSE))
-          }
-        }
-        break
-      }
-      case NPC_STATE.POSE: {
-        poseTimerRef.current += delta
-        if (poseTimerRef.current >= 2.0) {
-          poseTimerRef.current = 0
-          queueMicrotask(() => useNpcStore.getState().setState(NPC_STATE.SELFIE_CAPTURE))
-        }
-        break
+    // --- Rotation: Yuka-driven when moving, locked when stopped ---
+    // Re-read internalStateRef here (not `s`) so that if enterState changed it
+    // mid-frame (e.g. arrival → POSE), we don't sample Yuka's now-zeroed direction.
+    const currentState = internalStateRef.current
+    const isMoving = currentState === NPC_STATE.IDLE_ROAM || currentState === NPC_STATE.RUN_TO_SPOT
+    if (isMoving) {
+      const forward = vehicle.getDirection(new YUKA.Vector3())
+      if (forward.x !== 0 || forward.z !== 0) {
+        facingAngleRef.current = Math.atan2(forward.x, forward.z)
       }
     }
+    group.current.rotation.y = facingAngleRef.current
 
     // --- Plumbob bob + spin ---
     if (plumbobRef.current) {
@@ -321,7 +414,6 @@ export default function NPC({ config }) {
     npcTransform.position[2] = group.current.position.z
     npcTransform.rotation = group.current.rotation.y
 
-    // Camera anchor world position (parented to head bone)
     if (camAnchorRef.current) {
       const wp = new THREE.Vector3()
       camAnchorRef.current.getWorldPosition(wp)
@@ -329,7 +421,6 @@ export default function NPC({ config }) {
       npcTransform.camAnchor[1] = wp.y
       npcTransform.camAnchor[2] = wp.z
     }
-    // Head bone world position (lookAt target)
     if (headBone) {
       const hp = new THREE.Vector3()
       headBone.getWorldPosition(hp)
@@ -338,6 +429,10 @@ export default function NPC({ config }) {
       npcTransform.headPosition[2] = hp.z
     }
   })
+
+  // Wait until all required nodes are available (useGraph populates asynchronously on first render)
+  const requiredNodes = ['c_pos', 'Torus001', 'Torus001_1', 'Mesh', 'Mesh_1', 'Gloves001', 'Head001', 'Shoes001']
+  if (requiredNodes.some((k) => !nodes[k])) return null
 
   return (
     <group ref={group} dispose={null}>

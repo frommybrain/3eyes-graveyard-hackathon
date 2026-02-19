@@ -5,6 +5,7 @@ import CameraController from './selfieCamera'
 import WorldPresets from './worldPresets'
 import Floor from './floor'
 import Sky from './sky'
+import Buildings from './buildings'
 
 export default function MainScene({ controls }) {
   return (
@@ -14,6 +15,7 @@ export default function MainScene({ controls }) {
 
       <Floor controls={controls}/>
       <Sky simple />
+      <Buildings />
 
       {/* NPC */}
       <NPC config={controls.npc} />

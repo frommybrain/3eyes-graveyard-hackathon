@@ -38,7 +38,7 @@ export async function getTokenBalance(connection, userPubkey) {
   }
 }
 
-export async function buildPaymentTx(userPubkey) {
+export async function buildPaymentTx(userPubkey, priceDisplay = gameConfig.economy.thirdVisionPrice) {
   if (!isEconomyConfigured()) {
     throw new Error('Economy not configured: mint or treasury public key is missing. Check your .env.local')
   }
@@ -51,8 +51,10 @@ export async function buildPaymentTx(userPubkey) {
   const userAta = await getAssociatedTokenAddress(mint, user)
   const treasuryAta = await getAssociatedTokenAddress(mint, treasury)
 
+  const priceRaw = BigInt(priceDisplay) * BigInt(10 ** gameConfig.economy.decimals)
+
   const tx = new Transaction().add(
-    createTransferInstruction(userAta, treasuryAta, user, gameConfig.economy.priceRaw)
+    createTransferInstruction(userAta, treasuryAta, user, priceRaw)
   )
 
   const { blockhash } = await connection.getLatestBlockhash()

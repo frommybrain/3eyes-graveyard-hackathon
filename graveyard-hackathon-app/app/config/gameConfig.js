@@ -39,6 +39,7 @@ export const gameConfig = {
   // Economy
   economy: {
     thirdVisionPrice: 100,
+    auraRerollPrice: 50,
     totalSupply: 666,
     maxFreeVisions: 2,
     priceDisplay: 100,
@@ -60,6 +61,33 @@ export const gameConfig = {
 
   // NPC behaviour
   npc: { walkSpeed: 2, runSpeed: 8, color: '#8844ff', roamRadius: 15 },
+
+  // Fiat-only mode — hides all crypto UI, routes everything through Stripe + Crossmint
+  // Set NEXT_PUBLIC_FIAT_ONLY=true to activate (e.g. for non-web3 audience after hackathon)
+  fiatOnly: process.env.NEXT_PUBLIC_FIAT_ONLY === 'true',
+
+  // Crossmint (email-based custodial wallets)
+  crossmint: {
+    projectId: process.env.NEXT_PUBLIC_CROSSMINT_PROJECT_ID,
+    get environment() {
+      const cluster = process.env.NEXT_PUBLIC_CLUSTER || 'devnet'
+      return cluster === 'mainnet-beta' ? 'production' : 'staging'
+    },
+  },
+
+  // Fiat pricing (shown to non-web3 users)
+  fiatPricing: {
+    visionPriceGBP: 5,           // £5 for vision 3
+    auraRerollPriceGBP: 2.50,    // £2.50 for aura re-roll
+    currency: 'gbp',
+  },
+
+  // Physical print ordering
+  prints: {
+    enabled: true,
+    priceGBP: 0,              // 0 = free initially
+    currency: 'gbp',
+  },
 
   // Selfie camera
   selfieCamera: { fov: 85, offset: [2, 2, 3] },

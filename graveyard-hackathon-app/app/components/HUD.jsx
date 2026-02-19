@@ -4,10 +4,12 @@ import { useCallback, useState } from 'react'
 import { useWallet, useConnection } from '@solana/wallet-adapter-react'
 import { useGameStore, GAME_PHASE } from '../state/useGameStore'
 import { useNpcStore, NPC_STATE } from '../state/useNpcStore'
+import { useAuthStore } from '../state/useAuthStore'
 import { gameConfig } from '../config/gameConfig'
 import { pickAura } from '../lib/aura'
 import { buildPaymentTx, getTokenBalance, isEconomyConfigured } from '../lib/solana'
 import WalletButton from './walletButton'
+import StripePaymentModal from './StripePaymentModal'
 
 function BuyTokensPanel({ balance, onRefresh, refreshing, onClose }) {
   const price = gameConfig.economy.thirdVisionPrice
@@ -61,15 +63,22 @@ export default function HUD() {
   const phase = useGameStore((s) => s.phase)
   const visionCount = useGameStore((s) => s.visionCount)
   const npcState = useNpcStore((s) => s.state)
+  const authMethod = useAuthStore((s) => s.authMethod)
   const { publicKey, sendTransaction } = useWallet()
   const { connection } = useConnection()
+
+  const isFiatUser = authMethod === 'crossmint' || gameConfig.fiatOnly
 
   const [showBuyPanel, setShowBuyPanel] = useState(false)
   const [tokenBalance, setTokenBalance] = useState(null)
   const [refreshing, setRefreshing] = useState(false)
+  const [fiatLoading, setFiatLoading] = useState(false)
+  const [showPaymentModal, setShowPaymentModal] = useState(false)
+  const [paymentClientSecret, setPaymentClientSecret] = useState(null)
+  const [pendingVisionNumber, setPendingVisionNumber] = useState(null)
 
   const refreshBalance = useCallback(async () => {
-    if (!publicKey || !connection) return
+    if (!publicKey || !connection || isFiatUser) return
     setRefreshing(true)
     try {
       const bal = await getTokenBalance(connection, publicKey)
@@ -80,7 +89,7 @@ export default function HUD() {
     } finally {
       setRefreshing(false)
     }
-  }, [publicKey, connection])
+  }, [publicKey, connection, isFiatUser])
 
   // Dev summon — skips wallet/payment, picks random outcome with aura
   const handleDevSummon = () => {
@@ -98,17 +107,83 @@ export default function HUD() {
     useNpcStore.getState().setState(NPC_STATE.SUMMONED)
   }
 
+  // Complete vision after payment (shared by both crypto and fiat paths)
+  const completeVision = useCallback(async (nextVision, paymentData = {}) => {
+    try {
+      const res = await fetch('/api/vision', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          wallet: publicKey.toString(),
+          visionNumber: nextVision,
+          ...paymentData,
+        }),
+      })
+      const data = await res.json()
+      if (!data.ok) throw new Error(data.error)
+
+      useGameStore.getState().incrementVision()
+      useGameStore.getState().setSession(data.sessionId)
+      useGameStore.getState().setOutcome(data.outcome)
+      useGameStore.getState().setPhase(GAME_PHASE.REVEALED)
+      useNpcStore.getState().setTargetSpot(data.outcome.spot)
+      useNpcStore.getState().setCurrentPose(data.outcome.pose)
+      useNpcStore.getState().setState(NPC_STATE.SUMMONED)
+    } catch (err) {
+      console.error('Vision failed:', err)
+      useGameStore.getState().setPhase(GAME_PHASE.IDLE)
+    }
+  }, [publicKey])
+
+  // Fiat payment flow — inline Stripe Elements modal
+  const handleFiatPayment = useCallback(async (nextVision) => {
+    setFiatLoading(true)
+
+    try {
+      const res = await fetch('/api/create-payment-intent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          wallet: publicKey.toString(),
+          type: 'vision',
+        }),
+      })
+      const data = await res.json()
+      if (!data.ok) throw new Error(data.error)
+
+      setPaymentClientSecret(data.clientSecret)
+      setPendingVisionNumber(nextVision)
+      setShowPaymentModal(true)
+    } catch (err) {
+      console.error('Payment setup failed:', err)
+    } finally {
+      setFiatLoading(false)
+    }
+  }, [publicKey])
+
+  // Called when inline Stripe payment succeeds
+  const handlePaymentSuccess = useCallback(async (paymentIntentId) => {
+    setShowPaymentModal(false)
+    setPaymentClientSecret(null)
+    useGameStore.getState().setPhase(GAME_PHASE.SUMMONING)
+    await completeVision(pendingVisionNumber, { paymentIntentId })
+  }, [completeVision, pendingVisionNumber])
+
   // Seek vision — free for visions 1 & 2, paid for vision 3
   const handleSeekVision = useCallback(async () => {
     if (!publicKey) return
     const { visionCount: currentCount, maxFreeVisions } = useGameStore.getState()
     const nextVision = currentCount + 1
 
-    let txSig = null
-
-    // Vision 3 requires $3EYES payment
+    // Vision 3 requires payment
     if (nextVision > maxFreeVisions) {
-      // Check economy is configured
+      // Fiat user → Stripe Checkout
+      if (isFiatUser) {
+        await handleFiatPayment(nextVision)
+        return
+      }
+
+      // Web3 user → SPL token transfer
       if (!isEconomyConfigured()) {
         console.error('Economy not configured: set NEXT_PUBLIC_TREASURY_PUBKEY in .env.local')
         return
@@ -129,42 +204,20 @@ export default function HUD() {
       try {
         useGameStore.getState().setPhase(GAME_PHASE.SUMMONING)
         const tx = await buildPaymentTx(publicKey.toString())
-        txSig = await sendTransaction(tx, connection)
+        const txSig = await sendTransaction(tx, connection)
         await connection.confirmTransaction(txSig, 'confirmed')
+        await completeVision(nextVision, { txSig })
       } catch (err) {
         console.error('Payment failed:', err)
         useGameStore.getState().setPhase(GAME_PHASE.IDLE)
-        return
       }
-    } else {
-      useGameStore.getState().setPhase(GAME_PHASE.SUMMONING)
+      return
     }
 
-    try {
-      const res = await fetch('/api/vision', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          wallet: publicKey.toString(),
-          visionNumber: nextVision,
-          txSig,
-        }),
-      })
-      const data = await res.json()
-      if (!data.ok) throw new Error(data.error)
-
-      useGameStore.getState().incrementVision()
-      useGameStore.getState().setSession(data.sessionId)
-      useGameStore.getState().setOutcome(data.outcome)
-      useGameStore.getState().setPhase(GAME_PHASE.REVEALED)
-      useNpcStore.getState().setTargetSpot(data.outcome.spot)
-      useNpcStore.getState().setCurrentPose(data.outcome.pose)
-      useNpcStore.getState().setState(NPC_STATE.SUMMONED)
-    } catch (err) {
-      console.error('Vision failed:', err)
-      useGameStore.getState().setPhase(GAME_PHASE.IDLE)
-    }
-  }, [publicKey, sendTransaction, connection])
+    // Free vision — same for both user types
+    useGameStore.getState().setPhase(GAME_PHASE.SUMMONING)
+    await completeVision(nextVision)
+  }, [publicKey, sendTransaction, connection, isFiatUser, handleFiatPayment, completeVision])
 
   const handleReset = () => {
     useGameStore.getState().fullReset()
@@ -176,6 +229,11 @@ export default function HUD() {
   const isActive = phase !== GAME_PHASE.IDLE
   const showSeekButton = phase === GAME_PHASE.IDLE && visionCount < 2
   const showPaidVisionButton = phase === GAME_PHASE.IDLE && visionCount === 2
+
+  // Label for paid vision button depends on user type
+  const paidVisionLabel = isFiatUser
+    ? `Final Vision (£${gameConfig.fiatPricing.visionPriceGBP})`
+    : `Final Vision (${gameConfig.economy.thirdVisionPrice} $3EYES)`
 
   return (
     <div className="fixed inset-0 z-10 pointer-events-none">
@@ -229,9 +287,10 @@ export default function HUD() {
             {publicKey && (
               <button
                 onClick={handleSeekVision}
-                className="rounded-full bg-amber-600 px-6 py-3 text-white font-medium hover:bg-amber-500 transition-colors"
+                disabled={fiatLoading}
+                className="rounded-full bg-amber-600 px-6 py-3 text-white font-medium hover:bg-amber-500 transition-colors disabled:opacity-50"
               >
-                Final Vision ({gameConfig.economy.thirdVisionPrice} $3EYES)
+                {fiatLoading ? 'Loading...' : paidVisionLabel}
               </button>
             )}
             <button
@@ -261,14 +320,28 @@ export default function HUD() {
         )}
       </div>
 
-      {/* Buy tokens panel */}
-      {showBuyPanel && (
+      {/* Buy tokens panel — only for web3 users */}
+      {showBuyPanel && !isFiatUser && (
         <div className="pointer-events-auto">
           <BuyTokensPanel
             balance={tokenBalance}
             onRefresh={refreshBalance}
             refreshing={refreshing}
             onClose={() => setShowBuyPanel(false)}
+          />
+        </div>
+      )}
+
+      {/* Inline Stripe payment modal — fiat users */}
+      {showPaymentModal && paymentClientSecret && (
+        <div className="pointer-events-auto">
+          <StripePaymentModal
+            clientSecret={paymentClientSecret}
+            onSuccess={handlePaymentSuccess}
+            onCancel={() => { setShowPaymentModal(false); setPaymentClientSecret(null) }}
+            description="3EYES Final Vision"
+            amount={gameConfig.fiatPricing.visionPriceGBP * 100}
+            currency={gameConfig.fiatPricing.currency}
           />
         </div>
       )}
