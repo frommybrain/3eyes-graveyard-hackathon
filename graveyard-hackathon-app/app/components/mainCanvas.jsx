@@ -35,7 +35,7 @@ export default function MainCanvas() {
                 <Suspense>
                     <MainScene controls={controls} />
                 </Suspense>
-                <Stats />
+                <PostProcessing />
 
             </Canvas>
         </div>

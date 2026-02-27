@@ -23,8 +23,8 @@ export function seedToOutcome(seedHex, config) {
   // Weighted spot selection (rarity axis)
   const spot = pickWeighted(config.spots, buf.readUInt8(0))
 
-  // Equal-weight for presets and poses (visual variety)
-  const presetIndex = buf.readUInt8(4) % config.presets.length
+  // Weighted preset selection (atmosphere rarity)
+  const preset = pickWeighted(config.presets, buf.readUInt8(4))
   const poseIndex = buf.readUInt8(8) % config.poses.length
 
   // Aura is the other rarity axis
@@ -33,7 +33,7 @@ export function seedToOutcome(seedHex, config) {
 
   return {
     spot,
-    preset: config.presets[presetIndex],
+    preset,
     pose: config.poses[poseIndex],
     aura,
   }

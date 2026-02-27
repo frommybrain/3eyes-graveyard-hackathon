@@ -24,13 +24,14 @@ export const gameConfig = {
     { id: 'spot_8', name: 'Black Sun Throne', rarity: 'Legendary', weight: 3,  pos: [-10.22, 0, 1.28] },
   ],
 
-  // World presets — atmosphere variations selected by seed
+  // World presets — atmosphere variations selected by seed (weighted)
   // Each preset sets sky gradient (top/middle/bottom) + gradient mask color
+  // Probability = weight / sum_of_all_weights (currently 100)
   presets: [
-    { id: 'cool_whip', name: 'Cool Whip', skyTop: '#000000', skyMiddle: '#53b2ff', skyBottom: '#ffffff', gradientColor: '#4ebeff' },
-    { id: 'rose',      name: 'Rose',      skyTop: '#ff0060', skyMiddle: '#ff79bf', skyBottom: '#ffffff', gradientColor: '#ff5682' },
-    { id: 'soft',      name: 'Soft',      skyTop: '#ffa15e', skyMiddle: '#f5a270', skyBottom: '#ffffff', gradientColor: '#f2cfa2' },
-    { id: 'fuji',      name: 'Fuji',      skyTop: '#5effb1', skyMiddle: '#88e5e5', skyBottom: '#bffffa', gradientColor: '#cfffef' },
+    { id: 'cool_whip', name: 'Cool Whip', rarity: 'Common',   weight: 40, skyTop: '#000000', skyMiddle: '#53b2ff', skyBottom: '#ffffff', gradientColor: '#4ebeff' },
+    { id: 'rose',      name: 'Rose',      rarity: 'Uncommon', weight: 30, skyTop: '#ff0060', skyMiddle: '#ff79bf', skyBottom: '#ffffff', gradientColor: '#ff5682' },
+    { id: 'soft',      name: 'Soft',      rarity: 'Rare',     weight: 20, skyTop: '#ffa15e', skyMiddle: '#f5a270', skyBottom: '#ffffff', gradientColor: '#f2cfa2' },
+    { id: 'fuji',      name: 'Fuji',      rarity: 'Epic',     weight: 10, skyTop: '#5effb1', skyMiddle: '#88e5e5', skyBottom: '#bffffa', gradientColor: '#cfffef' },
   ],
 
   // Poses — animation clip names for when GLB model is ready

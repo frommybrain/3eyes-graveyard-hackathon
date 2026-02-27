@@ -10,12 +10,20 @@ import { Terrain } from './Terrain'
 import { OrbitControls } from '@react-three/drei'
 import { useThree, useFrame } from '@react-three/fiber'
 import { useCameraStore } from '../state/useCameraStore'
+import { useNpcStore, NPC_STATE } from '../state/useNpcStore'
 import * as THREE from 'three'
 import { useRef, useEffect, useState } from 'react'
 import { CatSculpture } from './catSculpture'
 
 const SHAKE_AMPLITUDE = 0.05
 const SHAKE_SPEED = 0.8
+
+const SELFIE_STATES = new Set([
+  NPC_STATE.SUMMONED,
+  NPC_STATE.RUN_TO_SPOT,
+  NPC_STATE.POSE,
+  NPC_STATE.SELFIE_CAPTURE,
+])
 
 function FixedCamera() {
   const { camera } = useThree()
@@ -24,6 +32,10 @@ function FixedCamera() {
   const timeRef = useRef(0)
 
   useFrame((_, delta) => {
+    // Yield to selfie camera when NPC is in a selfie state
+    const npcState = useNpcStore.getState().state
+    if (SELFIE_STATES.has(npcState)) return
+
     timeRef.current += delta * SHAKE_SPEED
 
     const { position, lookAt } = positions[index]
@@ -162,10 +174,10 @@ export default function MainScene({ controls }) {
   return (
     <>
       <CameraController config={controls.selfieCamera} />
-      <OrbitControls ref={orbitRef} />
+      {/*<OrbitControls ref={orbitRef} />*/}
       {/*<CamLogger />*/}
       {/*<PiPReverseCamera />*/}
-      {/*}<FixedCamera />*/}
+      <FixedCamera />
       <WorldPresets />
 
       <Sky />

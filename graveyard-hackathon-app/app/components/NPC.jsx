@@ -7,6 +7,9 @@ import { SkeletonUtils } from 'three-stdlib'
 import { useNpcStore, NPC_STATE } from '../state/useNpcStore'
 import { npcTransform } from '../state/npcTransform'
 import * as THREE from 'three'
+import { useLoader } from '@react-three/fiber'
+import { texture, uv } from 'three/tsl'
+import { MeshStandardNodeMaterial } from 'three/webgpu'
 import { findSmoothPath, findRandomPoint, findNearestPoly, DEFAULT_QUERY_FILTER } from 'navcat'
 import { generateSoloNavMesh } from 'navcat/blocks'
 
@@ -20,7 +23,7 @@ const MAX_DELTA = 0.1
 const _wp = new THREE.Vector3()
 const _hp = new THREE.Vector3()
 const _nearestResult = { success: false, nodeRef: 0, position: [0, 0, 0] }
-const _whiteMat = new THREE.MeshStandardMaterial({ color: 'white' })
+let _catMat = null
 const randRange = (min, max) => min + Math.random() * (max - min)
 
 // ──────────────────────────────────────────────────────────────
@@ -32,15 +35,36 @@ export default function NPC({ config }) {
   const clone = React.useMemo(() => SkeletonUtils.clone(scene), [scene])
   const { mixer } = useAnimations(animations, group)
 
+  const catBase = useLoader(THREE.TextureLoader, '/textures/CatBase.webp')
+
+  const catMat = React.useMemo(() => {
+    const tex = catBase.clone()
+    tex.flipY = false
+    tex.colorSpace = THREE.SRGBColorSpace
+    tex.needsUpdate = true
+    const mat = new MeshStandardNodeMaterial()
+    mat.colorNode = texture(tex, uv())
+    return mat
+  }, [catBase])
+
   useEffect(() => {
     if (!clone) return
     clone.traverse((child) => {
       if (child.isMesh || child.isSkinnedMesh) {
-        child.material = _whiteMat
+        child.material = catMat
         child.castShadow = true
       }
     })
-  }, [clone])
+  }, [clone, catMat])
+
+  // Play idle immediately to avoid T-pose on first load
+  useEffect(() => {
+    if (!animations?.length || !group.current) return
+    const clip = animations.find((c) => c.name === 'Selfie Idle')
+    if (!clip) return
+    const action = mixer.clipAction(clip, group.current)
+    action.play()
+  }, [animations, mixer])
 
   // Animation refs
   const myActions = useRef({})
