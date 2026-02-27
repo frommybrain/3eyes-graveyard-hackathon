@@ -1,271 +1,252 @@
 'use client'
-import { useFBO } from '@react-three/drei';
 import { useThree, useFrame } from '@react-three/fiber';
 import {
   useEffect,
   useMemo,
   useRef,
-  useState,
   useCallback,
 } from 'react';
 import * as THREE from 'three/webgpu';
 import {
+  Fn,
   pass,
+  vec2,
+  vec4,
+  uv,
+  nodeObject,
+  texture,
+  textureStore,
+  instanceIndex,
+  int,
+  uvec2,
+  float,
+  clamp,
+  smoothstep,
   uniform,
 } from 'three/tsl';
 
-// Import effects
-import { 
-  createOutlinePass, 
-  createOutlineComputeShader, 
-  outlineConfig 
-} from './postProcessing/outline';
-import {
-  createDitherPass,
-  createDitherComputeShader,
-  ditherConfig
-} from './postProcessing/dithering';
-import {
-  createBarrelDistortionPass,
-  createBarrelDistortionComputeShader,
-  barrelDistortionConfig,
-} from './postProcessing/barrelDistortion';
+import { ditherWGSL, ditherConfig } from './postProcessing/dithering';
+import { barrelDistortionConfig } from './postProcessing/barrelDistortion';
 
+// Simple composite node — reads result from storage texture
+class CompositeNode extends THREE.TempNode {
+  constructor(inputNode, storageTexture) {
+    super('vec4');
+    this.inputNode = inputNode;
+    this.storageTexture = storageTexture;
+  }
+  setup() {
+    const inputNode = this.inputNode;
+    const storageTex = this.storageTexture;
+    return Fn(() => {
+      const input = inputNode;
+      const result = texture(storageTex, uv());
+      return vec4(result.rgb, input.a);
+    })();
+  }
+}
 
+const createCompositePass = (node, storageTexture) =>
+  nodeObject(new CompositeNode(node, storageTexture));
 
-/**
- * PostProcessing Effect Compiler
- * 
- * This component acts as an orchestrator for multiple post-processing effects.
- * It manages the rendering pipeline and coordinates between different effects.
- * 
- * Current Effects:
- * - Outline: Dual Sobel edge detection with procedural noise displacement
- * - Dithering: Bayer matrix dithering with pixelation and color grading
- * 
- * Future Effects can be added by:
- * 1. Creating a new effect module in ./postProcessing/
- * 2. Importing and registering it in the effects array
- * 3. Adding it to the effect compilation pipeline
- */
+// ─── Combined dither + barrel compute shader ──────────────────────
+const createCombinedCompute = (sceneTextureNode, resolution, includeBarrel) => {
+  // Dither uniforms
+  const colorNum = uniform(8.0);
+  const pixelSize = uniform(4.0);
+  const colorTint = uniform(new THREE.Vector3(0.0, 0.0, 0.0));
+  const contrast = uniform(1.0);
+  const saturation = uniform(1.0);
 
-const PostProcessing = () => {
+  // Barrel uniforms
+  const k1 = uniform(0.4);
+  const k2 = uniform(0.2);
+
+  const computeTexture = Fn(
+    ({ storageTexture, sceneTexture }) => {
+      const posX = instanceIndex.mod(int(resolution.width));
+      const posY = instanceIndex.div(resolution.width);
+      const fragCoord = uvec2(posX, posY);
+
+      const uvCoord = vec2(
+        float(fragCoord.x).div(float(resolution.width)),
+        float(fragCoord.y).div(float(resolution.height)),
+      );
+
+      let sampleUV = uvCoord;
+      let vignetteMul = float(1.0);
+      let boundsMaskMul = float(1.0);
+
+      if (includeBarrel) {
+        // Barrel distortion (Brown-Conrady)
+        const center = vec2(0.5, 0.5);
+        const delta = uvCoord.sub(center);
+        const aspect = float(resolution.width).div(float(resolution.height));
+        const deltaAspect = vec2(delta.x.mul(aspect), delta.y);
+        const r2 = deltaAspect.dot(deltaAspect);
+        const r4 = r2.mul(r2);
+        const distortion = float(1.0).add(k1.mul(r2)).add(k2.mul(r4));
+        const distortedUV = center.add(delta.mul(distortion));
+
+        // Soft bounds mask
+        const margin = float(0.03);
+        const maskL = smoothstep(float(0.0).sub(margin), margin, distortedUV.x);
+        const maskR = smoothstep(float(1.0).add(margin), float(1.0).sub(margin), distortedUV.x);
+        const maskB = smoothstep(float(0.0).sub(margin), margin, distortedUV.y);
+        const maskT = smoothstep(float(1.0).add(margin), float(1.0).sub(margin), distortedUV.y);
+        boundsMaskMul = maskL.mul(maskR).mul(maskB).mul(maskT);
+
+        sampleUV = clamp(distortedUV, vec2(0.0), vec2(1.0));
+
+        // Vignette
+        const edgeDist = delta.length().mul(2.0);
+        vignetteMul = clamp(float(1.0).sub(edgeDist.mul(edgeDist).mul(0.6)), 0.0, 1.0);
+      }
+
+      // Sample scene at (possibly barrel-distorted) UV
+      const color = texture(sceneTexture, sampleUV);
+
+      // Dither
+      const res = vec2(float(resolution.width), float(resolution.height));
+      const dithered = ditherWGSL({
+        inputColor: color,
+        uvCoord: sampleUV,
+        resolution: res,
+        colorNum,
+        pixelSize,
+        colorTint,
+        contrast,
+        saturation,
+      });
+
+      // Apply barrel vignette + bounds if enabled
+      const finalColor = vec4(
+        dithered.rgb.mul(vignetteMul).mul(boundsMaskMul),
+        1.0,
+      );
+
+      textureStore(storageTexture, fragCoord, finalColor);
+    },
+  );
+
+  return {
+    computeTexture,
+    uniforms: { colorNum, pixelSize, colorTint, contrast, saturation, k1, k2 },
+  };
+};
+
+// ─── PostProcessing component ─────────────────────────────────────
+const PostProcessing = ({ dither = true, barrel = true }) => {
   const { scene, camera, gl, size } = useThree();
 
-  // Compute actual canvas pixel dimensions (square canvas)
   const dpr = gl.getPixelRatio();
   const pixelWidth = Math.round(size.width * dpr);
   const pixelHeight = Math.round(size.height * dpr);
-  const resolution = { width: pixelWidth, height: pixelHeight, dpr };
-
-  // Scene pass setup
-  const { outputNode, depthTexture } = useMemo(() => {
-    const scenePass = pass(scene, camera);
-    const scenePassColor = scenePass.getTextureNode('output');
-    const depthTexture = scenePass.getTextureNode('depth');
-
-    const outputNode = scenePassColor;
-
-    return {
-      outputNode,
-      depthTexture,
-    };
-  }, [scene, camera]);
-
-  // Normal visualization material for normal pass
-  const [normalVisualizationMaterial] = useState(
-    () => new THREE.MeshNormalMaterial(),
+  const resolution = useMemo(
+    () => ({ width: pixelWidth, height: pixelHeight, dpr }),
+    [pixelWidth, pixelHeight, dpr],
   );
 
-  // Normal render target for normal-based edge detection
-  const normalRenderTarget = useFBO(pixelWidth, pixelHeight);
+  // Scene pass
+  const { outputNode } = useMemo(() => {
+    const scenePass = pass(scene, camera);
+    return { outputNode: scenePass.getTextureNode('output') };
+  }, [scene, camera]);
 
-  // Effect compilation and setup
-  const { effectNodes, uniforms, buffers } = useMemo(() => {
-    const time = uniform(0.0);
+  const uniformsRef = useRef({});
+  const computePending = useRef(false);
+
+  // Build pipeline — single compute, single pass
+  const { computeNode, finalOutputNode, pipelineUniforms, storageTextureRef } = useMemo(() => {
+    if (!dither) {
+      return { computeNode: null, finalOutputNode: outputNode, pipelineUniforms: {}, storageTextureRef: null };
+    }
+
     const totalPixels = resolution.width * resolution.height;
+    const storageTexture = new THREE.StorageTexture(resolution.width, resolution.height);
 
-    // Storage texture for outline effect
-    const outlineStorageTexture = new THREE.StorageTexture(
-      resolution.width,
-      resolution.height,
-    );
-
-    // Storage texture for dithering effect
-    const ditherStorageTexture = new THREE.StorageTexture(
-      resolution.width,
-      resolution.height,
-    );
-
-    // Storage texture for barrel distortion effect
-    const barrelStorageTexture = new THREE.StorageTexture(
-      resolution.width,
-      resolution.height,
-    );
-
-    // Compile outline effect
-    const outlineShaderResult = createOutlineComputeShader(
-      depthTexture,
-      normalRenderTarget.texture,
-      resolution
-    );
-    const outlineComputeShader = outlineShaderResult.computeTexture;
-    const outlineUniforms = outlineShaderResult.uniforms;
-
-    const outlineComputeNode = outlineComputeShader({
-      storageTexture: outlineStorageTexture,
-      depthTexture: depthTexture,
-      normalTexture: normalRenderTarget.texture,
-    }).compute(totalPixels);
-
-    // Compile dithering effect
-    const ditherShaderResult = createDitherComputeShader(outputNode, resolution);
-    const ditherComputeShader = ditherShaderResult.computeTexture;
-    const ditherUniforms = ditherShaderResult.uniforms;
-
-    const ditherComputeNode = ditherComputeShader({
-      storageTexture: ditherStorageTexture,
+    const shaderResult = createCombinedCompute(outputNode, resolution, barrel);
+    const compute = shaderResult.computeTexture({
+      storageTexture,
       sceneTexture: outputNode,
-      outlineTexture: outlineStorageTexture,
     }).compute(totalPixels);
 
-    // Compile barrel distortion effect (reads from dithered output)
-    const barrelShaderResult = createBarrelDistortionComputeShader(ditherStorageTexture, resolution);
-    const barrelComputeShader = barrelShaderResult.computeTexture;
-    const barrelUniforms = barrelShaderResult.uniforms;
-
-    const barrelComputeNode = barrelComputeShader({
-      storageTexture: barrelStorageTexture,
-      sceneTexture: ditherStorageTexture,
-    }).compute(totalPixels);
+    const passNode = createCompositePass(outputNode, storageTexture);
 
     return {
-      effectNodes: {
-        outline: outlineComputeNode,
-        dithering: ditherComputeNode,
-        barrel: barrelComputeNode,
-      },
-      uniforms: {
-        time,
-        outline: outlineUniforms,
-        dither: ditherUniforms,
-        barrel: barrelUniforms,
-      },
-      buffers: {
-        outlineStorage: outlineStorageTexture,
-        ditherStorage: ditherStorageTexture,
-        barrelStorage: barrelStorageTexture,
-      },
+      computeNode: compute,
+      finalOutputNode: passNode,
+      pipelineUniforms: shaderResult.uniforms,
+      storageTextureRef: storageTexture,
     };
-  }, [depthTexture, normalRenderTarget, outputNode, resolution.width, resolution.height]);
+  }, [dither, barrel, outputNode, resolution]);
 
-  // Compute execution for all effects
-  const computeEffects = useCallback(async () => {
+  // Dispose old StorageTexture when pipeline rebuilds
+  useEffect(() => {
+    return () => {
+      if (storageTextureRef) storageTextureRef.dispose();
+    };
+  }, [storageTextureRef]);
+
+  useEffect(() => {
+    uniformsRef.current = pipelineUniforms;
+  }, [pipelineUniforms]);
+
+  // Compute dispatch with backpressure guard
+  const runCompute = useCallback(async () => {
+    if (!computeNode || computePending.current) return;
+    computePending.current = true;
     try {
-      // Execute outline effect
-      await gl.computeAsync(effectNodes.outline);
-
-      // Execute dithering effect
-      await gl.computeAsync(effectNodes.dithering);
-
-      // Execute barrel distortion effect
-      await gl.computeAsync(effectNodes.barrel);
+      await gl.computeAsync(computeNode);
     } catch (error) {
-      console.error('Effect computation error:', error);
+      console.error('Compute error:', error);
+    } finally {
+      computePending.current = false;
     }
-  }, [effectNodes, gl]);
+  }, [computeNode, gl]);
 
-  // Post-processing pipeline reference
+  // PostProcessing instance
   const postProcessingRef = useRef();
 
-  // Initialize post-processing pipeline
   useEffect(() => {
-    const postProcessing = new THREE.PostProcessing(gl);
-    postProcessing.outputNode = outputNode;
-    postProcessingRef.current = postProcessing;
-
-    if (postProcessingRef.current) {
-      postProcessingRef.current.needsUpdate = true;
-    }
-
+    const pp = new THREE.PostProcessing(gl);
+    pp.outputNode = finalOutputNode;
+    postProcessingRef.current = pp;
+    pp.needsUpdate = true;
     return () => {
+      if (pp.dispose) pp.dispose();
       postProcessingRef.current = null;
     };
-  }, [gl, outputNode]);
+  }, [gl, finalOutputNode]);
 
-  // Main render loop - handles normal pass and effect computation
+  // Frame loop — update uniforms + dispatch compute
   useFrame((state) => {
-    const { gl, clock, scene, camera } = state;
+    const u = uniformsRef.current;
 
-    // Update time uniform for time-based effects
-    uniforms.time.value = clock.getElapsedTime();
-    
-    // Update outline uniforms with config values
-    if (uniforms.outline) {
-      uniforms.outline.outlineThickness.value = outlineConfig.outlineThickness;
-      uniforms.outline.frequency.value = outlineConfig.frequency;
-      uniforms.outline.displacementStrength.value = outlineConfig.displacementStrength;
+    if (u.colorNum) {
+      u.colorNum.value = ditherConfig.colorNum;
+      u.pixelSize.value = ditherConfig.pixelSize;
+      u.colorTint.value.set(ditherConfig.colorTint.x, ditherConfig.colorTint.y, ditherConfig.colorTint.z);
+      u.contrast.value = ditherConfig.contrast;
+      u.saturation.value = ditherConfig.saturation;
     }
 
-    // Update dithering uniforms with config values
-    if (uniforms.dither) {
-      uniforms.dither.colorNum.value = ditherConfig.colorNum;
-      uniforms.dither.pixelSize.value = ditherConfig.pixelSize;
-      uniforms.dither.colorTint.value.set(
-        ditherConfig.colorTint.x,
-        ditherConfig.colorTint.y,
-        ditherConfig.colorTint.z
-      );
-      uniforms.dither.contrast.value = ditherConfig.contrast;
-      uniforms.dither.saturation.value = ditherConfig.saturation;
+    if (u.k1) {
+      u.k1.value = barrelDistortionConfig.k1;
+      u.k2.value = barrelDistortionConfig.k2;
     }
 
-    // Update barrel distortion uniforms with config values
-    if (uniforms.barrel) {
-      uniforms.barrel.k1.value = barrelDistortionConfig.k1;
-      uniforms.barrel.k2.value = barrelDistortionConfig.k2;
-    }
-
-    // === NORMAL PASS ===
-    // Render scene with normal materials for normal-based edge detection
-    gl.setRenderTarget(normalRenderTarget);
-
-    const materials = [];
-    scene.traverse((obj) => {
-      if (obj.isMesh) {
-        materials.push(obj.material);
-        obj.material = normalVisualizationMaterial;
-      }
-    });
-
-    gl.render(scene, camera);
-
-    // Restore original materials
-    scene.traverse((obj) => {
-      if (obj.isMesh) {
-        obj.material = materials.shift();
-      }
-    });
-
-    gl.setRenderTarget(null);
-
-    // === EFFECT COMPUTATION ===
-    computeEffects();
+    runCompute();
   });
 
-  // Final composite and render
+  // Final composite (priority 1 — runs after R3F default)
   useFrame(() => {
     if (postProcessingRef.current) {
-      // Chain effects: Scene -> Outline -> Dithering -> Barrel Distortion -> Screen
-      const outlinePass = createOutlinePass(outputNode, buffers.outlineStorage);
-      const ditherPass = createDitherPass(outlinePass, buffers.ditherStorage);
-      const barrelPass = createBarrelDistortionPass(ditherPass, buffers.barrelStorage);
-      postProcessingRef.current.outputNode = barrelPass;
       postProcessingRef.current.render();
     }
   }, 1);
 
-  return null; // This component doesn't render anything visible
+  return null;
 };
 
 export default PostProcessing;

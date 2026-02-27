@@ -128,7 +128,8 @@ describe('POST /api/reroll-aura', () => {
     expect(json.rerollCount).toBe(1)
   })
 
-  it('re-rolls aura with valid paymentIntentId', async () => {
+  // PaymentIntent tests disabled for hackathon (fiatEnabled: false)
+  it.skip('re-rolls aura with valid paymentIntentId', async () => {
     const session = createSession()
 
     mockPaymentIntentsRetrieve.mockResolvedValue({
@@ -148,7 +149,7 @@ describe('POST /api/reroll-aura', () => {
     expect(json.rerollCount).toBe(1)
   })
 
-  it('returns 402 if PaymentIntent is not succeeded', async () => {
+  it.skip('returns 402 if PaymentIntent is not succeeded', async () => {
     const session = createSession()
 
     mockPaymentIntentsRetrieve.mockResolvedValue({
@@ -166,7 +167,7 @@ describe('POST /api/reroll-aura', () => {
     expect(json.error).toMatch(/not completed/i)
   })
 
-  it('returns 403 if PaymentIntent metadata wallet mismatches', async () => {
+  it.skip('returns 403 if PaymentIntent metadata wallet mismatches', async () => {
     const session = createSession()
 
     mockPaymentIntentsRetrieve.mockResolvedValue({
@@ -184,7 +185,7 @@ describe('POST /api/reroll-aura', () => {
     expect(json.error).toMatch(/metadata/i)
   })
 
-  it('returns 403 if PaymentIntent metadata type is not reroll', async () => {
+  it.skip('returns 403 if PaymentIntent metadata type is not reroll', async () => {
     const session = createSession()
 
     mockPaymentIntentsRetrieve.mockResolvedValue({

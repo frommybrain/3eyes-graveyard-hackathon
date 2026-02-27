@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server'
 import { verifyPayment } from '../../lib/verifyPayment'
 import { deriveSeed } from '../../lib/seed'
-import { PublicKey } from '@solana/web3.js'
 import crypto from 'crypto'
 
 // In-memory session store — replace with Redis/DB for production
@@ -21,16 +20,10 @@ export async function POST(request) {
     }
 
     const rpcUrl = process.env.NEXT_PUBLIC_SOLANA_RPC_URL || 'https://api.devnet.solana.com'
-    const cluster = process.env.NEXT_PUBLIC_CLUSTER || 'devnet'
-    const expectedMint = new PublicKey(
-      cluster === 'mainnet-beta'
-        ? process.env.NEXT_PUBLIC_3EYES_MINT_MAINNET
-        : process.env.NEXT_PUBLIC_3EYES_MINT_DEVNET
-    )
     const treasuryPubkey = process.env.NEXT_PUBLIC_TREASURY_PUBKEY
 
-    // Verify payment on-chain
-    const { blockhash } = await verifyPayment(txSig, userPubkey, rpcUrl, expectedMint, treasuryPubkey)
+    // Verify SOL payment on-chain
+    const { blockhash } = await verifyPayment(txSig, userPubkey, rpcUrl, treasuryPubkey)
 
     // Derive deterministic seed
     const seed = deriveSeed(txSig, blockhash, userPubkey, process.env.SERVER_SALT || '')

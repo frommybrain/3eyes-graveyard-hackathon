@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 import crypto from 'crypto'
 import { pickAura } from '../../lib/aura'
 import { getStripe } from '../../lib/stripe'
-import { sessions } from '../vision/route'
+import { sessions } from '../../lib/sessionStore'
 import { verifyPayment } from '../../lib/verifyPayment'
 import { gameConfig } from '../../config/gameConfig'
 
@@ -39,7 +39,8 @@ export async function POST(request) {
       return NextResponse.json({ error: 'Payment already used' }, { status: 409 })
     }
 
-    if (paymentIntentId) {
+    if (gameConfig.fiatEnabled && paymentIntentId) {
+      // Fiat payment via Stripe (disabled for hackathon)
       const stripe = getStripe()
       const pi = await stripe.paymentIntents.retrieve(paymentIntentId)
       if (pi.status !== 'succeeded') {
@@ -49,10 +50,10 @@ export async function POST(request) {
         return NextResponse.json({ error: 'Payment metadata mismatch' }, { status: 403 })
       }
     } else if (txSig) {
+      // Crypto payment — verify on-chain SOL transfer
       const rpcUrl = gameConfig.economy.rpcUrl
-      const expectedMint = gameConfig.economy.mint
       const treasuryPubkey = gameConfig.economy.treasury
-      await verifyPayment(txSig, wallet, rpcUrl, expectedMint, treasuryPubkey)
+      await verifyPayment(txSig, wallet, rpcUrl, treasuryPubkey)
     }
 
     // Mark payment as consumed

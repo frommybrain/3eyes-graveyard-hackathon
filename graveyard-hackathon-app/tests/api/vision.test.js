@@ -121,9 +121,9 @@ describe('POST /api/vision', () => {
     expect(json.visionsRemaining).toBe(0)
   })
 
-  // --- Paid vision (3) — fiat/Stripe path ---
+  // --- Paid vision (3) — fiat/Stripe path (disabled for hackathon, fiatEnabled: false) ---
 
-  it('accepts vision 3 with a valid stripeSessionId', async () => {
+  it.skip('accepts vision 3 with a valid stripeSessionId', async () => {
     mockStripeRetrieve.mockResolvedValue({
       payment_status: 'paid',
       metadata: { wallet: TEST_WALLETS.user1 },
@@ -142,7 +142,7 @@ describe('POST /api/vision', () => {
     expect(json.ok).toBe(true)
   })
 
-  it('returns 402 if Stripe session is not paid', async () => {
+  it.skip('returns 402 if Stripe session is not paid', async () => {
     mockStripeRetrieve.mockResolvedValue({
       payment_status: 'unpaid',
       metadata: { wallet: TEST_WALLETS.user1 },
@@ -161,7 +161,7 @@ describe('POST /api/vision', () => {
     expect(json.error).toMatch(/not completed/i)
   })
 
-  it('returns 403 if Stripe session wallet does not match', async () => {
+  it.skip('returns 403 if Stripe session wallet does not match', async () => {
     mockStripeRetrieve.mockResolvedValue({
       payment_status: 'paid',
       metadata: { wallet: TEST_WALLETS.user2 },
@@ -231,9 +231,9 @@ describe('POST /api/vision', () => {
     expect(res1.json.sessionId).not.toBe(res2.json.sessionId)
   })
 
-  // --- Paid vision (3) — PaymentIntent path (inline Stripe Elements) ---
+  // --- Paid vision (3) — PaymentIntent path (disabled for hackathon, fiatEnabled: false) ---
 
-  it('accepts vision 3 with a valid paymentIntentId', async () => {
+  it.skip('accepts vision 3 with a valid paymentIntentId', async () => {
     mockPaymentIntentsRetrieve.mockResolvedValue({
       status: 'succeeded',
       metadata: { wallet: TEST_WALLETS.user1, type: 'vision' },
@@ -253,7 +253,7 @@ describe('POST /api/vision', () => {
     expect(json.visionNumber).toBe(3)
   })
 
-  it('returns 402 if PaymentIntent is not succeeded', async () => {
+  it.skip('returns 402 if PaymentIntent is not succeeded', async () => {
     mockPaymentIntentsRetrieve.mockResolvedValue({
       status: 'requires_payment_method',
       metadata: { wallet: TEST_WALLETS.user1, type: 'vision' },
@@ -272,7 +272,7 @@ describe('POST /api/vision', () => {
     expect(json.error).toMatch(/not completed/i)
   })
 
-  it('returns 403 if PaymentIntent wallet mismatches', async () => {
+  it.skip('returns 403 if PaymentIntent wallet mismatches', async () => {
     mockPaymentIntentsRetrieve.mockResolvedValue({
       status: 'succeeded',
       metadata: { wallet: TEST_WALLETS.user2, type: 'vision' },
@@ -291,7 +291,7 @@ describe('POST /api/vision', () => {
     expect(json.error).toMatch(/mismatch/i)
   })
 
-  it('returns 403 if PaymentIntent type is not vision', async () => {
+  it.skip('returns 403 if PaymentIntent type is not vision', async () => {
     mockPaymentIntentsRetrieve.mockResolvedValue({
       status: 'succeeded',
       metadata: { wallet: TEST_WALLETS.user1, type: 'reroll' },

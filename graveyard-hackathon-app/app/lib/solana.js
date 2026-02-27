@@ -1,5 +1,4 @@
-import { Connection, PublicKey, Transaction } from '@solana/web3.js'
-import { createTransferInstruction, getAssociatedTokenAddress, getAccount } from '@solana/spl-token'
+import { Connection, PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } from '@solana/web3.js'
 import { gameConfig } from '../config/gameConfig'
 
 export function getConnection() {
@@ -7,13 +6,12 @@ export function getConnection() {
 }
 
 /**
- * Check if economy config has valid public keys set
+ * Check if economy config has valid treasury public key set
  */
 export function isEconomyConfigured() {
-  const { mint, treasury } = gameConfig.economy
-  if (!mint || !treasury) return false
+  const { treasury } = gameConfig.economy
+  if (!treasury) return false
   try {
-    new PublicKey(mint)
     new PublicKey(treasury)
     return true
   } catch {
@@ -22,39 +20,36 @@ export function isEconomyConfigured() {
 }
 
 /**
- * Get the user's $3EYES token balance
- * @returns {number} Display balance (human-readable, not raw)
+ * Get the user's SOL balance
+ * @returns {number} Balance in SOL (human-readable)
  */
-export async function getTokenBalance(connection, userPubkey) {
-  const mint = new PublicKey(gameConfig.economy.mint)
+export async function getSolBalance(connection, userPubkey) {
   const user = typeof userPubkey === 'string' ? new PublicKey(userPubkey) : userPubkey
   try {
-    const ata = await getAssociatedTokenAddress(mint, user)
-    const account = await getAccount(connection, ata)
-    const raw = Number(account.amount)
-    return Math.floor(raw / Math.pow(10, gameConfig.economy.decimals))
+    const lamports = await connection.getBalance(user)
+    return lamports / LAMPORTS_PER_SOL
   } catch {
     return 0
   }
 }
 
-export async function buildPaymentTx(userPubkey, priceDisplay = gameConfig.economy.thirdVisionPrice) {
+export async function buildPaymentTx(userPubkey, priceSOL = gameConfig.economy.thirdVisionPrice) {
   if (!isEconomyConfigured()) {
-    throw new Error('Economy not configured: mint or treasury public key is missing. Check your .env.local')
+    throw new Error('Economy not configured: treasury public key is missing. Check your .env.local')
   }
 
   const connection = getConnection()
-  const mint = new PublicKey(gameConfig.economy.mint)
   const treasury = new PublicKey(gameConfig.economy.treasury)
   const user = new PublicKey(userPubkey)
 
-  const userAta = await getAssociatedTokenAddress(mint, user)
-  const treasuryAta = await getAssociatedTokenAddress(mint, treasury)
-
-  const priceRaw = BigInt(priceDisplay) * BigInt(10 ** gameConfig.economy.decimals)
+  const lamports = Math.round(priceSOL * LAMPORTS_PER_SOL)
 
   const tx = new Transaction().add(
-    createTransferInstruction(userAta, treasuryAta, user, priceRaw)
+    SystemProgram.transfer({
+      fromPubkey: user,
+      toPubkey: treasury,
+      lamports,
+    })
   )
 
   const { blockhash } = await connection.getLatestBlockhash()

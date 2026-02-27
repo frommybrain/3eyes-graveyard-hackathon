@@ -18,6 +18,7 @@ export const useGameStore = create((set, get) => ({
   visionCount: 0,
   maxFreeVisions: 2,
   incrementVision: () => set((s) => ({ visionCount: s.visionCount + 1 })),
+  setVisionCount: (visionCount) => set({ visionCount }),
 
   // Current session
   sessionId: null,
@@ -44,13 +45,13 @@ export const useGameStore = create((set, get) => ({
   // Mint
   mintResult: null,
   hasMinted: false,
+  setHasMinted: (hasMinted) => set({ hasMinted }),
   setMintResult: (result) => set({ mintResult: result, hasMinted: true }),
 
-  // Reset for next vision (preserves visionCount, hasMinted)
+  // Reset for next vision (preserves visionCount, hasMinted, sessionId for aura carry-forward)
   reset: () =>
     set({
       phase: GAME_PHASE.IDLE,
-      sessionId: null,
       outcome: null,
       capturedBlob: null,
       mintResult: null,

@@ -56,7 +56,7 @@ describe('Integration: Full Web3 User Flow', () => {
     expect(res2.json.visionNumber).toBe(2)
     expect(res2.json.visionsRemaining).toBe(1)
 
-    // Vision 3 — paid with $3EYES
+    // Vision 3 — paid with SOL
     const res3 = await parseResponse(
       await visionPOST(createRequest({ wallet, visionNumber: 3, txSig: 'real_tx_sig' }))
     )
@@ -75,7 +75,8 @@ describe('Integration: Full Web3 User Flow', () => {
   })
 })
 
-describe('Integration: Full Fiat User Flow', () => {
+// Fiat flow disabled for hackathon (fiatEnabled: false)
+describe.skip('Integration: Full Fiat User Flow', () => {
   let visionPOST, sessions, walletVisions, mintedWallets
 
   beforeEach(async () => {
@@ -163,38 +164,34 @@ describe('Integration: Mixed User Isolation', () => {
     mintedWallets.clear()
   })
 
-  it('web3 and fiat users do not interfere with each other', async () => {
-    // Web3 user takes 2 free visions
+  it('two users do not interfere with each other', async () => {
+    // User 1 takes 2 free visions
     await visionPOST(createRequest({ wallet: TEST_WALLETS.user1, visionNumber: 1 }))
     await visionPOST(createRequest({ wallet: TEST_WALLETS.user1, visionNumber: 2 }))
 
-    // Fiat user takes 2 free visions
+    // User 2 takes 2 free visions
     await visionPOST(createRequest({ wallet: TEST_WALLETS.user2, visionNumber: 1 }))
     await visionPOST(createRequest({ wallet: TEST_WALLETS.user2, visionNumber: 2 }))
 
-    // Web3 user pays with crypto
-    const web3Res = await parseResponse(
+    // User 1 pays with SOL
+    const res1 = await parseResponse(
       await visionPOST(createRequest({
         wallet: TEST_WALLETS.user1,
         visionNumber: 3,
-        txSig: 'crypto_tx',
+        txSig: 'crypto_tx_1',
       }))
     )
-    expect(web3Res.status).toBe(200)
+    expect(res1.status).toBe(200)
 
-    // Fiat user pays with Stripe
-    mockStripeRetrieve.mockResolvedValue({
-      payment_status: 'paid',
-      metadata: { wallet: TEST_WALLETS.user2 },
-    })
-    const fiatRes = await parseResponse(
+    // User 2 pays with SOL
+    const res2 = await parseResponse(
       await visionPOST(createRequest({
         wallet: TEST_WALLETS.user2,
         visionNumber: 3,
-        stripeSessionId: 'cs_test_fiat',
+        txSig: 'crypto_tx_2',
       }))
     )
-    expect(fiatRes.status).toBe(200)
+    expect(res2.status).toBe(200)
 
     // Both should have 3 visions
     expect(walletVisions.get(TEST_WALLETS.user1).count).toBe(3)

@@ -1,15 +1,31 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef, useCallback } from 'react'
 import { useWallet, useConnection } from '@solana/wallet-adapter-react'
 import { useGameStore, GAME_PHASE } from '../state/useGameStore'
 import { useNpcStore, NPC_STATE } from '../state/useNpcStore'
-import { useAuthStore } from '../state/useAuthStore'
 import { gameConfig } from '../config/gameConfig'
-import { pickAura } from '../lib/aura'
 import { buildPaymentTx, isEconomyConfigured } from '../lib/solana'
+import { useSeekVision } from '../hooks/useSeekVision'
+import { toast } from '../state/useToastStore'
+import { AURA_TIERS } from '../lib/aura'
 import PrintOrderButton from './PrintOrderButton'
-import StripePaymentModal from './StripePaymentModal'
+
+function TraitRow({ label, value, badge }) {
+  return (
+    <div className="flex justify-between items-center py-1">
+      <span className="text-zinc-500 text-xs uppercase tracking-wide">{label}</span>
+      <div className="flex items-center gap-2">
+        <span className="text-zinc-200 text-sm font-medium">{value}</span>
+        {badge && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-700 text-zinc-400 font-medium">
+            {badge}
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
 
 export default function SelfieModal() {
   const phase = useGameStore((s) => s.phase)
@@ -20,16 +36,78 @@ export default function SelfieModal() {
   const mintResult = useGameStore((s) => s.mintResult)
   const { publicKey, sendTransaction } = useWallet()
   const { connection } = useConnection()
-  const authMethod = useAuthStore((s) => s.authMethod)
   const [previewUrl, setPreviewUrl] = useState(null)
+  const { seekVision } = useSeekVision()
 
-  const isFiatUser = authMethod === 'crossmint' || gameConfig.fiatOnly
   const aura = outcome?.aura
 
   // Re-roll state
   const [rerolling, setRerolling] = useState(false)
-  const [showRerollPayment, setShowRerollPayment] = useState(false)
-  const [rerollClientSecret, setRerollClientSecret] = useState(null)
+  // Slot machine cycling + deceleration
+  const [slotAura, setSlotAura] = useState(null)
+  const slotTimerRef = useRef(null)
+  const pendingAuraRef = useRef(null)
+  // Flash animation when aura settles
+  const [auraFlash, setAuraFlash] = useState(false)
+  const prevAuraRef = useRef(aura?.id)
+
+  // Fast cycling phase — runs while rerolling and no pending result yet
+  useEffect(() => {
+    if (!rerolling) {
+      clearInterval(slotTimerRef.current)
+      return
+    }
+    // If we have a pending result, the deceleration handles it
+    if (pendingAuraRef.current) return
+
+    let i = 0
+    slotTimerRef.current = setInterval(() => {
+      setSlotAura(AURA_TIERS[i % AURA_TIERS.length])
+      i++
+    }, 100)
+    return () => clearInterval(slotTimerRef.current)
+  }, [rerolling])
+
+  // Deceleration — triggered when finishReroll stores result in pendingAuraRef
+  const startDeceleration = useCallback(() => {
+    clearInterval(slotTimerRef.current)
+    const finalAura = pendingAuraRef.current
+    if (!finalAura) return
+
+    // Quick deceleration — snappy, not dragged out
+    const delays = [120, 160, 220, 320, 500]
+    let step = 0
+
+    const tick = () => {
+      if (step < delays.length) {
+        setSlotAura(AURA_TIERS[Math.floor(Math.random() * AURA_TIERS.length)])
+        slotTimerRef.current = setTimeout(tick, delays[step])
+        step++
+      } else {
+        // Land on the final result
+        setSlotAura(finalAura)
+        slotTimerRef.current = setTimeout(() => {
+          setSlotAura(null)
+          pendingAuraRef.current = null
+          setRerolling(false)
+          const currentOutcome = useGameStore.getState().outcome
+          useGameStore.getState().setOutcome({ ...currentOutcome, aura: finalAura })
+          toast.success(`Aura re-rolled: ${finalAura.name} (Tier ${finalAura.tier})`)
+        }, 400)
+      }
+    }
+    tick()
+  }, [])
+
+  // Detect aura change and trigger flash
+  useEffect(() => {
+    if (aura && prevAuraRef.current && aura.id !== prevAuraRef.current) {
+      setAuraFlash(true)
+      const timer = setTimeout(() => setAuraFlash(false), 800)
+      return () => clearTimeout(timer)
+    }
+    prevAuraRef.current = aura?.id
+  }, [aura])
 
   useEffect(() => {
     if (blob) {
@@ -51,22 +129,9 @@ export default function SelfieModal() {
   const canSeekPaidVision = visionCount === gameConfig.economy.maxFreeVisions
   const canMint = visionCount >= 1
 
-  const handleSeekAnother = () => {
+  const handleSeekAnother = async () => {
     useGameStore.getState().reset()
-
-    // Immediately trigger a new vision — NPC runs straight to next spot
-    const spots = gameConfig.spots
-    const spot = spots[Math.floor(Math.random() * spots.length)]
-    const preset = gameConfig.presets[Math.floor(Math.random() * gameConfig.presets.length)]
-    const pose = gameConfig.poses[Math.floor(Math.random() * gameConfig.poses.length)]
-    const aura = pickAura(Math.floor(Math.random() * 100))
-
-    useGameStore.getState().incrementVision()
-    useGameStore.getState().setOutcome({ spot, preset, pose, aura })
-    useGameStore.getState().setPhase(GAME_PHASE.REVEALED)
-    useNpcStore.getState().setTargetSpot(spot)
-    useNpcStore.getState().setCurrentPose(pose)
-    useNpcStore.getState().setState(NPC_STATE.SUMMONED)
+    await seekVision()
   }
 
   const handleMint = async () => {
@@ -85,21 +150,25 @@ export default function SelfieModal() {
 
       useGameStore.getState().setMintResult(data)
       useGameStore.getState().setPhase(GAME_PHASE.DONE)
+
+      // Persist to localStorage for gallery button
+      if (typeof window !== 'undefined' && publicKey) {
+        localStorage.setItem(`3eyes-nft-${publicKey.toString()}`, JSON.stringify({
+          mint: data.mint,
+          imageUrl: data.imageUrl,
+        }))
+      }
+
+      toast.success('Minted successfully!')
     } catch (err) {
       console.error('Mint failed:', err)
-      useGameStore.getState().setMintResult({
-        mint: 'DEV_PLACEHOLDER',
-        mintNumber: 0,
-        totalSupply: 666,
-        aura,
-      })
-      useGameStore.getState().setPhase(GAME_PHASE.DONE)
+      toast.error(err.message || 'Mint failed')
+      // Go back to result screen — don't show DONE with fake data
+      useGameStore.getState().setPhase(GAME_PHASE.VISION_RESULT)
     }
   }
 
-  // Complete re-roll after payment verification
   const finishReroll = async (paymentData) => {
-    setRerolling(true)
     try {
       const res = await fetch('/api/reroll-aura', {
         method: 'POST',
@@ -113,63 +182,36 @@ export default function SelfieModal() {
       const data = await res.json()
       if (!data.ok) throw new Error(data.error)
 
-      // Update outcome with new aura (preserve spot/preset/pose)
-      useGameStore.getState().setOutcome({ ...outcome, aura: data.aura })
+      // Store result and start deceleration — don't apply yet
+      pendingAuraRef.current = data.aura
+      startDeceleration()
     } catch (err) {
-      console.error('Re-roll failed:', err)
-    } finally {
+      toast.error(err.message || 'Re-roll failed')
       setRerolling(false)
     }
   }
 
-  // Crypto re-roll: build SPL transfer → send → call reroll API
-  const handleCryptoReroll = async () => {
+  const handleReroll = async () => {
     if (!publicKey || !isEconomyConfigured()) return
     setRerolling(true)
     try {
       const tx = await buildPaymentTx(publicKey.toString(), gameConfig.economy.auraRerollPrice)
       const txSig = await sendTransaction(tx, connection)
+      toast.info('Transaction sent, confirming...')
       await connection.confirmTransaction(txSig, 'confirmed')
+      toast.success(`Payment confirmed (${gameConfig.economy.auraRerollPrice} SOL)`)
       await finishReroll({ txSig })
     } catch (err) {
-      console.error('Crypto re-roll failed:', err)
+      if (err.message?.includes('User rejected') || err.message?.includes('rejected')) {
+        toast.info('Transaction cancelled')
+      } else {
+        toast.error(err.message || 'Re-roll failed')
+      }
       setRerolling(false)
     }
   }
 
-  // Fiat re-roll: create PaymentIntent → show inline Stripe form
-  const handleFiatReroll = async () => {
-    try {
-      const res = await fetch('/api/create-payment-intent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          wallet: publicKey.toString(),
-          type: 'reroll',
-        }),
-      })
-      const data = await res.json()
-      if (!data.ok) throw new Error(data.error)
-
-      setRerollClientSecret(data.clientSecret)
-      setShowRerollPayment(true)
-    } catch (err) {
-      console.error('Re-roll payment setup failed:', err)
-    }
-  }
-
-  // Called when inline Stripe payment for re-roll succeeds
-  const handleRerollPaymentSuccess = async (paymentIntentId) => {
-    setShowRerollPayment(false)
-    setRerollClientSecret(null)
-    await finishReroll({ paymentIntentId })
-  }
-
-  const handleReroll = isFiatUser ? handleFiatReroll : handleCryptoReroll
-
-  const rerollLabel = isFiatUser
-    ? `Re-roll Aura (\u00a3${gameConfig.fiatPricing.auraRerollPriceGBP.toFixed(2)})`
-    : `Re-roll Aura (${gameConfig.economy.auraRerollPrice} $3EYES)`
+  const rerollLabel = `Re-roll Aura (${gameConfig.economy.auraRerollPrice} SOL)`
 
   const handleClose = () => {
     useGameStore.getState().fullReset()
@@ -178,116 +220,170 @@ export default function SelfieModal() {
     useNpcStore.getState().setCurrentPose(null)
   }
 
+  // Aura display styles with flash animation
+  const auraDisplayClass = auraFlash
+    ? 'text-center space-y-1 transition-all duration-500 scale-110'
+    : 'text-center space-y-1 transition-all duration-500 scale-100'
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
-      <div className="flex flex-col items-center gap-4 rounded-2xl bg-zinc-900 p-8 max-w-lg w-full mx-4">
+      <div className="flex flex-col items-center gap-4 rounded-2xl bg-zinc-900 p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto">
 
-
+        {/* Selfie preview */}
         {previewUrl && (
           <img
             src={previewUrl}
             alt="Pilgrim Selfie"
-            className="max-h-80 rounded-xl border border-zinc-700"
+            className="max-h-64 rounded-xl border border-zinc-700"
           />
         )}
 
-        {aura && phase !== GAME_PHASE.MINTING && (
-          <div className="text-center space-y-1">
-            <div className="text-2xl font-bold" style={{ color: aura.color }}>
-              {'\u2605'.repeat(aura.tier)} {aura.name}
+        {/* Aura display — slot machine cycling during re-roll, flash on settle */}
+        {aura && phase !== GAME_PHASE.MINTING && (() => {
+          const displayAura = slotAura || aura
+          const isSlotting = !!slotAura
+          return (
+            <div className={auraDisplayClass}>
+              {/* Stars — fixed 5-slot width to prevent layout shift */}
+              <div
+                className={`text-lg tracking-widest transition-colors ${isSlotting ? 'duration-75' : 'duration-500'}`}
+                style={{ color: displayAura.color }}
+              >
+                {'\u2605'.repeat(displayAura.tier)}
+                <span className="opacity-20">{'\u2605'.repeat(5 - displayAura.tier)}</span>
+              </div>
+              {/* Name */}
+              <div
+                className={`text-2xl font-bold transition-colors ${isSlotting ? 'duration-75' : 'duration-500'}`}
+                style={{
+                  color: displayAura.color,
+                  textShadow: auraFlash
+                    ? `0 0 24px ${displayAura.color}, 0 0 48px ${displayAura.color}`
+                    : isSlotting
+                      ? `0 0 8px ${displayAura.color}`
+                      : 'none',
+                }}
+              >
+                {displayAura.name}
+              </div>
+              <div className={`text-sm italic transition-opacity duration-200 ${isSlotting ? 'text-zinc-600' : 'text-zinc-400'}`}>
+                {isSlotting ? 'Re-rolling...' : displayAura.description}
+              </div>
             </div>
-            <div className="text-sm text-zinc-400 italic">{aura.description}</div>
-          </div>
-        )}
+          )
+        })()}
 
+        {/* Metadata traits */}
         {outcome && phase === GAME_PHASE.VISION_RESULT && (
-          <div className="text-xs font-mono text-zinc-500 space-y-0.5">
-            {/*<div>Spot: {outcome.spot?.name}</div>
-            <div>Atmosphere: {outcome.preset?.name}</div>*/}
+          <div className="w-full bg-zinc-800/50 rounded-lg px-4 py-2 divide-y divide-zinc-700/50">
+            <TraitRow label="Location" value={outcome.spot?.name} badge={outcome.spot?.rarity} />
+            <TraitRow label="Atmosphere" value={outcome.preset?.name} />
+            <TraitRow label="Pose" value={outcome.pose?.name} />
+            <TraitRow label="Aura" value={aura?.name} badge={`Tier ${aura?.tier}`} />
           </div>
         )}
 
+        {/* VISION_RESULT actions */}
         {phase === GAME_PHASE.VISION_RESULT && (
-          <div className="flex flex-col gap-2 w-full mt-2">
-            {/* Re-roll aura button */}
-            <button
-              onClick={handleReroll}
-              disabled={rerolling}
-              className="w-full rounded-full bg-amber-600 px-6 py-3 text-white font-medium hover:bg-amber-500 transition-colors disabled:opacity-50"
-            >
-              {rerolling ? 'Re-rolling...' : rerollLabel}
-            </button>
-
-            {canMint && (
+          <div className="flex flex-col items-center gap-4 w-full mt-1">
+            {/* Top row — Re-roll + Mint side by side */}
+            <div className="flex gap-2 w-full">
               <button
-                onClick={handleMint}
+                onClick={handleReroll}
                 disabled={rerolling}
-                className="w-full rounded-full bg-purple-600 px-6 py-3 text-white font-medium hover:bg-purple-500 transition-colors disabled:opacity-50"
+                className="flex-1 rounded-full bg-amber-600 px-4 py-3 text-white text-sm font-medium hover:bg-amber-500 transition-colors disabled:opacity-50"
               >
-                Mint for free
+                {rerolling ? 'Re-rolling...' : rerollLabel}
               </button>
-            )}
 
-            {canSeekFreeVision && (
-              <button
-                onClick={handleSeekAnother}
-                disabled={rerolling}
-                className="w-full rounded-full bg-zinc-700 px-6 py-3 text-white font-medium hover:bg-zinc-600 transition-colors disabled:opacity-50"
-              >
-                Take another selfie ({gameConfig.economy.maxFreeVisions - visionCount} free remaining)
-              </button>
-            )}
+              {canMint && (
+                <button
+                  onClick={handleMint}
+                  disabled={rerolling}
+                  className="flex-1 rounded-full bg-purple-600 px-4 py-3 text-white text-sm font-medium hover:bg-purple-500 transition-colors disabled:opacity-50"
+                >
+                  Mint for free
+                </button>
+              )}
+            </div>
 
-            {canSeekPaidVision && (
-              <button
-                onClick={handleSeekAnother}
-                disabled={rerolling}
-                className="w-full rounded-full bg-amber-600 px-6 py-3 text-white font-medium hover:bg-amber-500 transition-colors disabled:opacity-50"
-              >
-                {isFiatUser
-                  ? `Final Selfie (\u00a3${gameConfig.fiatPricing.visionPriceGBP})`
-                  : `Final Selfie (${gameConfig.economy.thirdVisionPrice} $3EYES)`}
-              </button>
+            {/* Shutter-style "take another" button */}
+            {(canSeekFreeVision || canSeekPaidVision) && (
+              <div className="flex flex-col items-center gap-1">
+                <button
+                  onClick={handleSeekAnother}
+                  disabled={rerolling}
+                  className={`w-14 h-14 rounded-full border-4 flex items-center justify-center transition-all hover:scale-105 active:scale-95 disabled:opacity-40 ${
+                    canSeekPaidVision ? 'border-amber-500' : 'border-white'
+                  }`}
+                >
+                  <div className={`w-10 h-10 rounded-full ${canSeekPaidVision ? 'bg-amber-500' : 'bg-white'}`} />
+                </button>
+                <span className={`text-xs ${canSeekPaidVision ? 'text-amber-400' : 'text-zinc-400'}`}>
+                  {canSeekPaidVision
+                    ? `Final selfie (${gameConfig.economy.thirdVisionPrice} SOL)`
+                    : `Take another selfie (${gameConfig.economy.maxFreeVisions - visionCount} free)`}
+                </span>
+              </div>
             )}
           </div>
         )}
 
         {phase === GAME_PHASE.MINTING && (
-          <div className="text-zinc-400 animate-pulse">Uploading and minting...</div>
+          <div className="text-zinc-400 animate-pulse">Minting...</div>
         )}
 
-        {phase === GAME_PHASE.DONE && (
-          <div className="text-center space-y-3 w-full">
-            <div className="text-green-400 font-medium">
-              Pilgrim #{mintResult?.mintNumber || '?'} / {mintResult?.totalSupply || 666}
+        {phase === GAME_PHASE.DONE && (() => {
+          const cluster = gameConfig.economy.cluster
+          const explorerBase = cluster === 'mainnet-beta'
+            ? 'https://explorer.solana.com'
+            : `https://explorer.solana.com`
+          const clusterParam = cluster === 'mainnet-beta' ? '' : `?cluster=${cluster}`
+          return (
+            <div className="text-center space-y-3 w-full">
+              <div className="text-green-400 font-medium">
+                Pilgrim #{mintResult?.mintNumber || '?'} / {mintResult?.totalSupply || 666}
+              </div>
+              <div className="flex gap-2 justify-center text-xs">
+                {mintResult?.signature && (
+                  <a
+                    href={`${explorerBase}/tx/${mintResult.signature}${clusterParam}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-purple-400 hover:text-purple-300 underline"
+                  >
+                    View Transaction
+                  </a>
+                )}
+                {mintResult?.mint && (
+                  <a
+                    href={`${explorerBase}/address/${mintResult.mint}${clusterParam}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-purple-400 hover:text-purple-300 underline"
+                  >
+                    View NFT
+                  </a>
+                )}
+              </div>
+              {gameConfig.prints.enabled && (
+                <PrintOrderButton
+                  wallet={publicKey?.toString()}
+                  mintAddress={mintResult?.mint}
+                  imageUrl={mintResult?.imageUrl}
+                  sessionId={sessionId}
+                />
+              )}
+              <button
+                onClick={handleClose}
+                className="w-full rounded-full bg-zinc-700 px-6 py-2 text-white text-sm hover:bg-zinc-600 transition-colors"
+              >
+                Close
+              </button>
             </div>
-            <PrintOrderButton
-              wallet={publicKey?.toString()}
-              mintAddress={mintResult?.mint}
-              imageUrl={mintResult?.imageUrl}
-              sessionId={sessionId}
-            />
-            <button
-              onClick={handleClose}
-              className="w-full rounded-full bg-zinc-700 px-6 py-2 text-white text-sm hover:bg-zinc-600 transition-colors"
-            >
-              Close
-            </button>
-          </div>
-        )}
+          )
+        })()}
       </div>
-
-      {/* Inline Stripe payment modal for aura re-roll */}
-      {showRerollPayment && rerollClientSecret && (
-        <StripePaymentModal
-          clientSecret={rerollClientSecret}
-          onSuccess={handleRerollPaymentSuccess}
-          onCancel={() => { setShowRerollPayment(false); setRerollClientSecret(null) }}
-          description="3EYES Aura Re-roll"
-          amount={Math.round(gameConfig.fiatPricing.auraRerollPriceGBP * 100)}
-          currency={gameConfig.fiatPricing.currency}
-        />
-      )}
     </div>
   )
 }

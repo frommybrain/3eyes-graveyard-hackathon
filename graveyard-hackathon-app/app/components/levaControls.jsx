@@ -4,11 +4,6 @@ import { useControls, folder } from 'leva'
 import { gameConfig } from '../config/gameConfig'
 
 export function useSceneControls() {
-  const scene = useControls('Scene', {
-    skyColor: { value: gameConfig.sky.color, label: 'Sky Color' },
-    groundColor: { value: gameConfig.ground.color, label: 'Ground Color' },
-  })
-
   const lighting = useControls('Lighting', {
     dirColor: { value: gameConfig.dirLight.color, label: 'Dir Color' },
     dirIntensity: { value: gameConfig.dirLight.intensity, min: 0, max: 3, step: 0.1, label: 'Dir Intensity' },
@@ -33,10 +28,6 @@ export function useSceneControls() {
   })
 
   return {
-    scene: {
-      sky: { color: scene.skyColor },
-      ground: { color: scene.groundColor, size: gameConfig.ground.size },
-    },
     lighting: {
       dirLight: {
         color: lighting.dirColor,

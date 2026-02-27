@@ -35,15 +35,9 @@ export default function CameraController({ config }) {
       cam.position.set(anchor[0], anchor[1], anchor[2])
       cam.lookAt(head[0], head[1], head[2])
       cam.fov = config.fov
-    } else if (npc === NPC_STATE.IDLE_ROAM || npc === NPC_STATE.DONE) {
-      // Default overhead view
-      cam.position.set(DEFAULT_POS[0], DEFAULT_POS[1], DEFAULT_POS[2])
-      cam.lookAt(DEFAULT_LOOK[0], DEFAULT_LOOK[1], DEFAULT_LOOK[2])
-      cam.fov = 55
+      cam.aspect = state.size.width / state.size.height
+      cam.updateProjectionMatrix()
     }
-
-    cam.aspect = state.size.width / state.size.height
-    cam.updateProjectionMatrix()
   })
 
   return null
