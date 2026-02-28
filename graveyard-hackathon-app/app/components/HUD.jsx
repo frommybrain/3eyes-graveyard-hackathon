@@ -248,7 +248,8 @@ export default function HUD() {
   return (
     <div className="fixed inset-0 z-10 pointer-events-none">
       {/* Top-right wallet */}
-      <div className="absolute top-4 right-4 pointer-events-auto">
+      <div className="absolute top-4 right-4 pointer-events-auto flex items-center gap-2">
+        <span className="px-2 py-0.5 rounded-full bg-yellow-500 text-black text-xs font-bold uppercase tracking-wide">devnet</span>
         <WalletButton />
       </div>
 
