@@ -49,7 +49,7 @@ export const gameConfig = {
     auraRerollPrice: 0.0333,     // SOL for aura re-roll
     totalSupply: 666,
     maxFreeVisions: 2,
-    maxSelfies: 3, // Hard cap per batch
+    maxSelfies: 999, // Hard cap per batch (set back to 3 after hackathon)
     selfieCooldownHours: 3, // Hours before a new batch of selfies unlocks
     devWallets: ['Fop6HTZr57VAHw8t2S8MGwJvxJ9BGWHvLfLrRajKMv6'], // Bypass cooldown
     cluster: process.env.NEXT_PUBLIC_CLUSTER || 'devnet',

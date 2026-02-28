@@ -16,9 +16,10 @@ export async function POST(request) {
     }
 
     const isDev = (gameConfig.economy.devWallets || []).includes(wallet)
-    if (!isDev && await hasMinted(wallet)) {
-      return NextResponse.json({ error: 'Wallet already minted' }, { status: 409 })
-    }
+    // HACKATHON: allow unlimited mints per wallet (restore after hackathon)
+    // if (!isDev && await hasMinted(wallet)) {
+    //   return NextResponse.json({ error: 'Wallet already minted' }, { status: 409 })
+    // }
 
     const walletData = walletVisions.get(wallet) || { count: 0, sessions: [], batchStartedAt: null }
 

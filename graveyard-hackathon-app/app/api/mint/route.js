@@ -20,10 +20,10 @@ export async function POST(request) {
 
     const isDev = (gameConfig.economy.devWallets || []).includes(wallet)
 
-    // Persistent checks (Upstash Redis on Vercel, file fallback locally)
-    if (!isDev && await hasMinted(wallet)) {
-      return NextResponse.json({ error: 'Wallet already minted' }, { status: 409 })
-    }
+    // HACKATHON: allow unlimited mints per wallet (restore after hackathon)
+    // if (!isDev && await hasMinted(wallet)) {
+    //   return NextResponse.json({ error: 'Wallet already minted' }, { status: 409 })
+    // }
 
     const mintNumber = (await getMintCount()) + 1
     if (mintNumber > TOTAL_SUPPLY) {
